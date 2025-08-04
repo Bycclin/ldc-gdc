@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# gdc – a GCC-style driver wrapper for LDC, with correct linker-flag forwarding
+#
+
+set -euo pipefail
+
+# 1. No args → just run ldc2
+if (( $# == 0 )); then
+  exec ldc2
+fi
+
+# 2. Single-arg Autoconf probes
+if (( $# == 1 )); then
+  case "$1" in
+    -version|--version|-v|-V) exec ldc2 --version ;;
+    -help|--help)             exec ldc2 --help    ;;
+    -dumpversion)             exec gcc -dumpversion ;;
+    -dumpmachine)             exec gcc -dumpmachine ;;
+  esac
+fi
+
+# 3. Detect D-mode (any .d/.di/.o → D); else fallback to gcc
+d_mode=
+for a in "$@"; do
+  case $a in
+    *.d|*.di|*.o) d_mode=1; break ;;
+  esac
+done
+if [[ -z $d_mode ]]; then
+  exec gcc "$@"
+fi
+
+# 4. Collect & translate flags for ldc2
+out=
+compile_only=0
+warn_flags=()      # plain array
+other_args=()
+
+while (( $# )); do
+  arg=$1; shift
+
+  # a) strip Autoconf’s “-x <lang>”
+  if [[ $arg == -x ]]; then
+    shift
+    continue
+  fi
+
+  # b) drop stray -v/-V in compile contexts
+  if [[ $arg == -v || $arg == -V ]]; then
+    continue
+  fi
+
+  case $arg in
+    -o)      out=$1; shift ;;
+    -o*)     out=${arg#-o} ;;
+    -c)      compile_only=1 ;;
+    -g|-O*)  warn_flags+=( "$arg" ) ;;
+    -pipe|-pthread) ;;
+    -fversion=*)      other_args+=( "--d-version=${arg#*=}" ) ;;
+    -frelease)        other_args+=( "--release" ) ;;
+    -fPIE)            other_args+=( "--relocation-model=pic" ) ;;
+    -fno-exceptions)  other_args+=( "--fno-exceptions" ) ;;
+    -fno-rtti)        other_args+=( "--fno-rtti" ) ;;
+    -fno-strict-aliasing|-fasynchronous-unwind-tables)
+                       echo "gdc: warning: unsupported flag '$arg' ignored" >&2
+                       ;;
+    -target)          other_args+=( "-mtriple" "$1" ); shift ;;
+    -target=*)        other_args+=( "-mtriple=${arg#*=}" ) ;;
+    -Wall|-Wextra)    warn_flags+=( "-wi" ) ;;
+    -Werror)          warn_flags+=( "-w" ) ;;
+    -Wdeprecated)     other_args+=( "-dw" ) ;;
+    -W*|-pedantic)    ;;  # drop
+    -D*)              other_args+=( "--d-version=${arg#-D}" ) ;;
+    -MT)              echo "gdc: warning: unsupported flag '-MT' ignored" >&2 ;;
+    -MMD|-MD|--MD|-MP|--MP) ;;
+    -MF)              other_args+=( "-makedeps=$1" ); shift ;;
+    -pie)             other_args+=( "-L-pie" ) ;;
+    -shared-libphobos)  other_args+=( "-link-defaultlib-shared=true" ) ;;
+    -static-libphobos)  other_args+=( "-link-defaultlib-shared=false" ) ;;
+    -static-libstdc++)   other_args+=( "-L${arg}" ) ;;
+    -static-libgcc)      other_args+=( "-L${arg}" ) ;;
+    -L*)               other_args+=( "-L${arg}" ) ;;  # passes “-L/path” to linker
+    -l*)               other_args+=( "-L${arg}" ) ;;  # passes “-l<lib>” to linker
+    -I*|-J*)           other_args+=( "$arg" ) ;;
+    *)                 other_args+=( "$arg" ) ;;
+  esac
+done
+
+# 5. Determine default output if none provided
+get_default_out() {
+  for src in "${other_args[@]:-}"; do
+    if [[ $src != -* && -f $src ]]; then
+      bn=${src##*/}
+      if (( compile_only )); then
+        printf '%s.o\n' "${bn%.*}"
+      else
+        printf '%s\n'   "${bn%.*}"
+      fi
+      return
+    fi
+  done
+  if (( compile_only )); then
+    printf 'a.o\n'
+  else
+    printf 'a.out\n'
+  fi
+}
+
+# 6. Assemble & exec ldc2
+if (( compile_only )); then
+  cmd=( ldc2 -c "${warn_flags[@]:-}" "${other_args[@]:-}" )
+  if [[ -n $out ]]; then
+    cmd+=( -of "$out" )
+  else
+    cmd+=( -of "$(get_default_out)" )
+  fi
+else
+  cmd=( ldc2 "${warn_flags[@]:-}" "${other_args[@]:-}" )
+  [[ -n $out ]] && cmd+=( -of "$out" )
+fi
+
+# 7. Debug?
+[[ -n ${GDC_DEBUG:-} ]] && echo "gdc-debug: ${cmd[*]}" >&2
+
+exec "${cmd[@]}"
