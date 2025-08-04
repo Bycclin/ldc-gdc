@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 #
-# gdc – a GCC-style driver wrapper for LDC, with correct linker-flag forwarding
+# gdc – a GCC-style wrapper for LDC
 #
 
 set -euo pipefail
 
-# 1. No args → just run ldc2
 if (( $# == 0 )); then
   exec ldc2
 fi
 
-# 2. Single-arg Autoconf probes
 if (( $# == 1 )); then
   case "$1" in
     -version|--version|-v|-V) exec ldc2 --version ;;
@@ -20,7 +18,6 @@ if (( $# == 1 )); then
   esac
 fi
 
-# 3. Detect D-mode (any .d/.di/.o → D); else fallback to gcc
 d_mode=
 for a in "$@"; do
   case $a in
@@ -31,16 +28,14 @@ if [[ -z $d_mode ]]; then
   exec gcc "$@"
 fi
 
-# 4. Collect & translate flags for ldc2
 out=
 compile_only=0
-warn_flags=()      # plain array
+warn_flags=()
 other_args=()
 
 while (( $# )); do
   arg=$1; shift
 
-  # a) strip Autoconf’s “-x <lang>”
   if [[ $arg == -x ]]; then
     shift
     continue
@@ -87,7 +82,6 @@ while (( $# )); do
   esac
 done
 
-# 5. Determine default output if none provided
 get_default_out() {
   for src in "${other_args[@]:-}"; do
     if [[ $src != -* && -f $src ]]; then
@@ -107,7 +101,6 @@ get_default_out() {
   fi
 }
 
-# 6. Assemble & exec ldc2
 if (( compile_only )); then
   cmd=( ldc2 -c "${warn_flags[@]:-}" "${other_args[@]:-}" )
   if [[ -n $out ]]; then
@@ -120,7 +113,6 @@ else
   [[ -n $out ]] && cmd+=( -of "$out" )
 fi
 
-# 7. Debug?
 [[ -n ${GDC_DEBUG:-} ]] && echo "gdc-debug: ${cmd[*]}" >&2
 
 exec "${cmd[@]}"
