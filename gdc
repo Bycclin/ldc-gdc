@@ -6,6 +6,11 @@
 set -euo pipefail
 
 DC_BIN=${DC:-ldc2}
+DC_BASENAME=${DC_BIN##*/}
+case "$DC_BASENAME" in
+  dmd|ldmd|ldmd2) DC_KIND=dmd ;;
+  *)              DC_KIND=ldc ;;
+esac
 
 if (( $# == 0 )); then
   exec "$DC_BIN"
@@ -32,8 +37,17 @@ fi
 
 out=
 compile_only=0
-warn_flags=()
+opt_dbg_flags=()
 other_args=()
+
+append_version_flag() {
+  local name=$1
+  if [[ $DC_KIND == dmd ]]; then
+    other_args+=( "-version=${name}" )
+  else
+    other_args+=( "-d-version=${name}" )
+  fi
+}
 
 while (( $# )); do
   arg=$1; shift
@@ -59,51 +73,117 @@ while (( $# )); do
     -o*)
       out=${arg#-o}
       ;;
-    -c)      compile_only=1 ;;
-    -g|-O*)  warn_flags+=( "$arg" ) ;;
-    -pipe|-pthread) ;;
 
-    -fversion=*)      other_args+=( "-d-version=${arg#*=}" ) ;;
-    -frelease)        other_args+=( "-release" ) ;;
-    -fPIE)            other_args+=( "-relocation-model=pic" ) ;;
-    -fno-exceptions)  other_args+=( "--fno-exceptions" ) ;;
-    -fno-rtti)        other_args+=( "--fno-rtti" ) ;;
+    -c)
+      compile_only=1
+      ;;
+
+    -g)
+      opt_dbg_flags+=( "$arg" )
+      ;;
+    -O|-O0|-O1|-O2|-O3)
+      if [[ $DC_KIND == dmd ]]; then
+        opt_dbg_flags+=( "-O" )
+      else
+        opt_dbg_flags+=( "$arg" )
+      fi
+      ;;
+
+    -pipe|-pthread)
+      ;;
+
+    -fversion=*)
+      append_version_flag "${arg#*=}"
+      ;;
+    -D*)
+      append_version_flag "${arg#-D}"
+      ;;
+
+    -frelease)
+      other_args+=( "-release" )
+      ;;
+
+    -fPIE)
+      other_args+=( "-fPIC" )
+      ;;
+
+    -fno-exceptions|-fno-rtti|--fno-exceptions|--fno-rtti)
+      echo "gdc: warning: unsupported flag '$arg' ignored (no direct D compiler equivalent)" >&2
+      ;;
+
     -fno-strict-aliasing|-fasynchronous-unwind-tables)
-                       echo "gdc: warning: unsupported flag '$arg' ignored" >&2
-                       ;;
+      echo "gdc: warning: unsupported flag '$arg' ignored" >&2
+      ;;
+
     -target)
-                       if [[ $# -eq 0 ]]; then
-                         echo "gdc: error: missing triple after '-target'" >&2
-                         exit 1
-                       fi
-                       other_args+=( "-mtriple" "$1" ); shift ;;
-    -target=*)        other_args+=( "-mtriple=${arg#*=}" ) ;;
+      if [[ $# -eq 0 ]]; then
+        echo "gdc: error: missing triple after '-target'" >&2
+        exit 1
+      fi
+      other_args+=( "-mtriple" "$1" )
+      shift
+      ;;
+    -target=*)
+      other_args+=( "-mtriple=${arg#*=}" )
+      ;;
 
-    -Wall|-Wextra)    warn_flags+=( "-wi" ) ;;
-    -Werror)          warn_flags+=( "-w" ) ;;
-    -Wdeprecated)     other_args+=( "-dw" ) ;;
-    -W*|-pedantic)    ;;  # drop other W* flags
-    -D*)              other_args+=( "-d-version=${arg#-D}" ) ;;
+    -Wall|-Wextra)
+      other_args+=( "-wi" )
+      ;;
+    -Werror)
+      other_args+=( "-w" )
+      ;;
+    -Wdeprecated)
+      other_args+=( "-dw" )
+      ;;
+    -W*|-pedantic)
+      ;;
 
-    -MT)              echo "gdc: warning: unsupported flag '-MT' ignored" >&2 ;;
-    -MMD|-MD|--MD|-MP|--MP) ;;
+    -MT)
+      echo "gdc: warning: unsupported flag '-MT' ignored" >&2
+      ;;
+    -MMD|-MD|--MD|-MP|--MP)
+      ;;
     -MF)
-                       if [[ $# -eq 0 ]]; then
-                         echo "gdc: error: missing filename after '-MF'" >&2
-                         exit 1
-                       fi
-                       other_args+=( "-makedeps=$1" ); shift ;;
-    -pie)               other_args+=( "-L-pie" ) ;;
-    -shared-libphobos)  other_args+=( "-link-defaultlib-shared=true" ) ;;
-    -static-libphobos)  other_args+=( "-link-defaultlib-shared=false" ) ;;
-    -static-libstdc++)  other_args+=( "-L${arg}" ) ;;
-    -static-libgcc)     other_args+=( "-L${arg}" ) ;;
-    -L*)                other_args+=( "-L${arg}" ) ;;  # pass to linker
-    -l*)                other_args+=( "-L${arg}" ) ;;  # pass to linker
+      if [[ $# -eq 0 ]]; then
+        echo "gdc: error: missing filename after '-MF'" >&2
+        exit 1
+      fi
+      other_args+=( "-makedeps=$1" )
+      shift
+      ;;
 
-    -I*|-J*)           other_args+=( "$arg" ) ;;
+    -pie)
+      other_args+=( "-L-pie" )
+      ;;
+    -shared-libphobos)
+      if [[ $DC_KIND == ldc ]]; then
+        other_args+=( "-link-defaultlib-shared=true" )
+      else
+        echo "gdc: warning: '-shared-libphobos' unsupported for dmd; ignoring" >&2
+      fi
+      ;;
+    -static-libphobos)
+      if [[ $DC_KIND == ldc ]]; then
+        other_args+=( "-link-defaultlib-shared=false" )
+      else
+        echo "gdc: warning: '-static-libphobos' unsupported for dmd; ignoring" >&2
+      fi
+      ;;
+    -static-libstdc++|-static-libgcc)
+      other_args+=( "-L${arg}" )
+      ;;
+    -L*|-l*)
+      other_args+=( "-L${arg}" )
+      ;;
 
-    *)                 other_args+=( "$arg" ) ;;
+    -I*|-J*)
+      other_args+=( "$arg" )
+      ;;
+
+    *)
+      other_args+=( "$arg" )
+      ;;
   esac
 done
 
@@ -130,7 +210,7 @@ get_default_out() {
 
 if (( compile_only )); then
   cmd=( "$DC_BIN" -c )
-  if (( ${#warn_flags[@]} )); then cmd+=( "${warn_flags[@]}" ); fi
+  if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
   if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
   if [[ -n $out ]]; then
     cmd+=( "-of=${out}" )
@@ -139,13 +219,13 @@ if (( compile_only )); then
   fi
 else
   cmd=( "$DC_BIN" )
-  if (( ${#warn_flags[@]} )); then cmd+=( "${warn_flags[@]}" ); fi
+  if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
   if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
   if [[ -n $out ]]; then
     cmd+=( "-of=${out}" )
   fi
 fi
 
-[[ -n ${GDC_DEBUG:-} ]] && echo "gdc-debug: ${cmd[*]}" >&2
+[[ -n ${GDC_DEBUG:-} ]] && echo "gdc-debug ($DC_KIND): ${cmd[*]}" >&2
 
 exec "${cmd[@]}"
