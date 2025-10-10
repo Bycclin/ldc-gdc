@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 #
-# gdc – a GCC-style wrapper for LDC
+# gdc – a GCC-style wrapper for a D compiler
+# - Uses $DC if set, otherwise defaults to ldc2
 #
 
 set -euo pipefail
 
+# Choose compiler: environment DC or fallback to ldc2
+DC_BIN=${DC:-ldc2}
+
 if (( $# == 0 )); then
-  exec ldc2
+  exec "$DC_BIN"
 fi
 
 if (( $# == 1 )); then
   case "$1" in
-    -version|--version|-v|-V) exec ldc2 --version ;;
-    -help|--help)             exec ldc2 --help    ;;
-    -dumpversion)             exec gcc -dumpversion ;;
-    -dumpmachine)             exec gcc -dumpmachine ;;
+    -version|--version|-v|-V) exec "$DC_BIN" --version ;;
+    -help|--help)             exec "$DC_BIN" --help    ;;
+    -dumpversion)             exec gcc -dumpversion    ;;
+    -dumpmachine)             exec gcc -dumpmachine    ;;
   esac
 fi
 
@@ -30,6 +34,7 @@ fi
 
 out=
 compile_only=0
+# Arrays (may remain empty; guard expansions under set -u)
 warn_flags=()
 other_args=()
 
@@ -37,63 +42,98 @@ while (( $# )); do
   arg=$1; shift
 
   if [[ $arg == -x ]]; then
-    shift
+    # drop language specifier after -x (matches gcc wrapper behavior)
+    if (( $# )); then shift; fi
     continue
   fi
 
-  # b) drop stray -v/-V in compile contexts
+  # drop stray -v/-V in compile contexts
   if [[ $arg == -v || $arg == -V ]]; then
     continue
   fi
 
   case $arg in
-    -o)      out=$1; shift ;;
-    -o*)     out=${arg#-o} ;;
+    -o)
+      if [[ $# -eq 0 ]]; then
+        echo "gdc: error: missing filename after '-o'" >&2
+        exit 1
+      fi
+      out=$1
+      shift
+      ;;
+    -o*)
+      out=${arg#-o}
+      ;;
     -c)      compile_only=1 ;;
     -g|-O*)  warn_flags+=( "$arg" ) ;;
     -pipe|-pthread) ;;
-    -fversion=*)      other_args+=( "--d-version=${arg#*=}" ) ;;
-    -frelease)        other_args+=( "--release" ) ;;
-    -fPIE)            other_args+=( "--relocation-model=pic" ) ;;
+
+    # Feature/version toggles (prefer forms compatible with ldc2 & dmd)
+    -fversion=*)      other_args+=( "-d-version=${arg#*=}" ) ;;
+    -frelease)        other_args+=( "-release" ) ;;
+    -fPIE)            other_args+=( "-relocation-model=pic" ) ;;
     -fno-exceptions)  other_args+=( "--fno-exceptions" ) ;;
     -fno-rtti)        other_args+=( "--fno-rtti" ) ;;
     -fno-strict-aliasing|-fasynchronous-unwind-tables)
                        echo "gdc: warning: unsupported flag '$arg' ignored" >&2
                        ;;
-    -target)          other_args+=( "-mtriple" "$1" ); shift ;;
+    -target)
+                       if [[ $# -eq 0 ]]; then
+                         echo "gdc: error: missing triple after '-target'" >&2
+                         exit 1
+                       fi
+                       other_args+=( "-mtriple" "$1" ); shift ;;
     -target=*)        other_args+=( "-mtriple=${arg#*=}" ) ;;
+
+    # Warnings
     -Wall|-Wextra)    warn_flags+=( "-wi" ) ;;
     -Werror)          warn_flags+=( "-w" ) ;;
     -Wdeprecated)     other_args+=( "-dw" ) ;;
-    -W*|-pedantic)    ;;  # drop
-    -D*)              other_args+=( "--d-version=${arg#-D}" ) ;;
+    -W*|-pedantic)    ;;  # drop other W* flags
+
+    # D version from -DNAME (gcc-style) → D flag
+    -D*)              other_args+=( "-d-version=${arg#-D}" ) ;;
+
+    # Depfile-related
     -MT)              echo "gdc: warning: unsupported flag '-MT' ignored" >&2 ;;
     -MMD|-MD|--MD|-MP|--MP) ;;
-    -MF)              other_args+=( "-makedeps=$1" ); shift ;;
-    -pie)             other_args+=( "-L-pie" ) ;;
+    -MF)
+                       if [[ $# -eq 0 ]]; then
+                         echo "gdc: error: missing filename after '-MF'" >&2
+                         exit 1
+                       fi
+                       other_args+=( "-makedeps=$1" ); shift ;;
+
+    # Linking styles/libs
+    -pie)               other_args+=( "-L-pie" ) ;;
     -shared-libphobos)  other_args+=( "-link-defaultlib-shared=true" ) ;;
     -static-libphobos)  other_args+=( "-link-defaultlib-shared=false" ) ;;
-    -static-libstdc++)   other_args+=( "-L${arg}" ) ;;
-    -static-libgcc)      other_args+=( "-L${arg}" ) ;;
-    -L*)               other_args+=( "-L${arg}" ) ;;  # passes “-L/path” to linker
-    -l*)               other_args+=( "-L${arg}" ) ;;  # passes “-l<lib>” to linker
+    -static-libstdc++)  other_args+=( "-L${arg}" ) ;;
+    -static-libgcc)     other_args+=( "-L${arg}" ) ;;
+    -L*)                other_args+=( "-L${arg}" ) ;;  # pass to linker
+    -l*)                other_args+=( "-L${arg}" ) ;;  # pass to linker
+
+    # Include/import paths (compatible with both compilers)
     -I*|-J*)           other_args+=( "$arg" ) ;;
+
     *)                 other_args+=( "$arg" ) ;;
   esac
 done
 
 get_default_out() {
-  for src in "${other_args[@]:-}"; do
-    if [[ $src != -* && -f $src ]]; then
-      bn=${src##*/}
-      if (( compile_only )); then
-        printf '%s.o\n' "${bn%.*}"
-      else
-        printf '%s\n'   "${bn%.*}"
+  if (( ${#other_args[@]} )); then
+    for src in "${other_args[@]}"; do
+      if [[ $src != -* && -f $src ]]; then
+        bn=${src##*/}
+        if (( compile_only )); then
+          printf '%s.o\n' "${bn%.*}"
+        else
+          printf '%s\n'   "${bn%.*}"
+        fi
+        return
       fi
-      return
-    fi
-  done
+    done
+  fi
   if (( compile_only )); then
     printf 'a.o\n'
   else
@@ -101,16 +141,23 @@ get_default_out() {
   fi
 }
 
+# Build command safely under `set -u`: only expand arrays if non-empty
 if (( compile_only )); then
-  cmd=( ldc2 -c "${warn_flags[@]:-}" "${other_args[@]:-}" )
+  cmd=( "$DC_BIN" -c )
+  if (( ${#warn_flags[@]} )); then cmd+=( "${warn_flags[@]}" ); fi
+  if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
   if [[ -n $out ]]; then
-    cmd+=( -of "$out" )
+    cmd+=( "-of=${out}" )
   else
-    cmd+=( -of "$(get_default_out)" )
+    cmd+=( "-of=$(get_default_out)" )
   fi
 else
-  cmd=( ldc2 "${warn_flags[@]:-}" "${other_args[@]:-}" )
-  [[ -n $out ]] && cmd+=( -of "$out" )
+  cmd=( "$DC_BIN" )
+  if (( ${#warn_flags[@]} )); then cmd+=( "${warn_flags[@]}" ); fi
+  if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
+  if [[ -n $out ]]; then
+    cmd+=( "-of=${out}" )
+  fi
 fi
 
 [[ -n ${GDC_DEBUG:-} ]] && echo "gdc-debug: ${cmd[*]}" >&2
