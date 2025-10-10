@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
 # gdc – a GCC-style wrapper for a D compiler
-# - Uses $DC if set, otherwise defaults to ldc2
 #
 
 set -euo pipefail
