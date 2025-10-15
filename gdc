@@ -39,7 +39,12 @@ out=
 compile_only=0
 opt_dbg_flags=()
 other_args=()
+
 want_no_pie=0
+want_pthread_link=0
+want_export_dynamic=0
+want_static_libstdcxx=0
+want_static_libgcc=0
 
 append_version_flag() {
   local name=$1
@@ -50,14 +55,20 @@ append_version_flag() {
   fi
 }
 
+forward_Wl_list() {
+  local csv=$1
+  IFS=',' read -r -a parts <<< "$csv"
+  for p in "${parts[@]}"; do
+    [[ -n $p ]] && other_args+=( "-L-${p}" )
+  done
+}
+
 while (( $# )); do
   arg=$1; shift
-
   if [[ $arg == -x ]]; then
-    if (( $# )); then shift; fi
+    (( $# )) && shift
     continue
   fi
-
   if [[ $arg == -v || $arg == -V ]]; then
     continue
   fi
@@ -90,7 +101,11 @@ while (( $# )); do
       fi
       ;;
 
-    -pipe|-pthread)
+    -pipe)
+      ;;
+
+    -pthread)
+      want_pthread_link=1
       ;;
 
     -fversion=*)
@@ -105,19 +120,19 @@ while (( $# )); do
       ;;
 
     -fPIE|-fpie)
-      # GCC's -fPIE -> PIC codegen; D uses -fPIC for PIC codegen
       other_args+=( "-fPIC" )
       ;;
     -fno-PIE|-fno-pie)
-      # Do not pass through to D compilers; record intent to disable PIE at link time
       want_no_pie=1
       ;;
     -pie)
-      # Request PIE at link time
       other_args+=( "-L-pie" )
       ;;
     -no-pie)
       want_no_pie=1
+      ;;
+    -rdynamic)
+      want_export_dynamic=1   # later becomes -L--export-dynamic
       ;;
 
     -fno-exceptions|-fno-rtti|--fno-exceptions|--fno-rtti)
@@ -139,7 +154,9 @@ while (( $# )); do
     -target=*)
       other_args+=( "-mtriple=${arg#*=}" )
       ;;
-
+    -W)
+      other_args+=( "-wi" )
+      ;;
     -Wall|-Wextra)
       other_args+=( "-wi" )
       ;;
@@ -149,7 +166,15 @@ while (( $# )); do
     -Wdeprecated)
       other_args+=( "-dw" )
       ;;
-    -W*|-pedantic)
+    -Wno-*)
+      ;;
+    -Wl,*)
+      forward_Wl_list "${arg#-Wl,}"
+      ;;
+    -W*)
+      ;;
+
+    -pedantic)
       ;;
 
     -MT)
@@ -180,7 +205,15 @@ while (( $# )); do
         echo "gdc: warning: '-static-libphobos' unsupported for dmd; ignoring" >&2
       fi
       ;;
-    -static-libstdc++|-static-libgcc)
+
+    -static-libstdc++)
+      want_static_libstdcxx=1
+      ;;
+    -static-libgcc)
+      want_static_libgcc=1
+      ;;
+
+    -static|-shared)
       other_args+=( "-L${arg}" )
       ;;
     -L*|-l*)
@@ -218,11 +251,10 @@ get_default_out() {
   fi
 }
 
-# Build final command
 if (( compile_only )); then
   cmd=( "$DC_BIN" -c )
-  if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
-  if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
+  (( ${#opt_dbg_flags[@]} )) && cmd+=( "${opt_dbg_flags[@]}" )
+  (( ${#other_args[@]} ))    && cmd+=( "${other_args[@]}" )
   if [[ -n $out ]]; then
     cmd+=( "-of=${out}" )
   else
@@ -230,12 +262,20 @@ if (( compile_only )); then
   fi
 else
   cmd=( "$DC_BIN" )
-  if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
-  if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
-  # If the user requested no-PIE, pass the appropriate linker flag
-  if (( want_no_pie )); then
-    cmd+=( "-L-no-pie" )
+  (( ${#opt_dbg_flags[@]} )) && cmd+=( "${opt_dbg_flags[@]}" )
+  (( ${#other_args[@]} ))    && cmd+=( "${other_args[@]}" )
+
+  (( want_no_pie ))           && cmd+=( "-L-no-pie" )
+  (( want_pthread_link ))     && cmd+=( "-L-pthread" )
+  (( want_export_dynamic ))   && cmd+=( "-L--export-dynamic" )
+
+  if (( want_static_libstdcxx )); then
+    cmd+=( "-L-Bstatic" "-L-lstdc++" "-L-Bdynamic" )
   fi
+  if (( want_static_libgcc )); then
+    cmd+=( "-L-Bstatic" "-L-lgcc" "-L-Bdynamic" )
+  fi
+
   if [[ -n $out ]]; then
     cmd+=( "-of=${out}" )
   fi
