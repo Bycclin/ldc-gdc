@@ -39,6 +39,7 @@ out=
 compile_only=0
 opt_dbg_flags=()
 other_args=()
+want_no_pie=0
 
 append_version_flag() {
   local name=$1
@@ -103,8 +104,20 @@ while (( $# )); do
       other_args+=( "-release" )
       ;;
 
-    -fPIE)
+    -fPIE|-fpie)
+      # GCC's -fPIE -> PIC codegen; D uses -fPIC for PIC codegen
       other_args+=( "-fPIC" )
+      ;;
+    -fno-PIE|-fno-pie)
+      # Do not pass through to D compilers; record intent to disable PIE at link time
+      want_no_pie=1
+      ;;
+    -pie)
+      # Request PIE at link time
+      other_args+=( "-L-pie" )
+      ;;
+    -no-pie)
+      want_no_pie=1
       ;;
 
     -fno-exceptions|-fno-rtti|--fno-exceptions|--fno-rtti)
@@ -153,9 +166,6 @@ while (( $# )); do
       shift
       ;;
 
-    -pie)
-      other_args+=( "-L-pie" )
-      ;;
     -shared-libphobos)
       if [[ $DC_KIND == ldc ]]; then
         other_args+=( "-link-defaultlib-shared=true" )
@@ -208,6 +218,7 @@ get_default_out() {
   fi
 }
 
+# Build final command
 if (( compile_only )); then
   cmd=( "$DC_BIN" -c )
   if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
@@ -221,6 +232,10 @@ else
   cmd=( "$DC_BIN" )
   if (( ${#opt_dbg_flags[@]} )); then cmd+=( "${opt_dbg_flags[@]}" ); fi
   if (( ${#other_args[@]} )); then cmd+=( "${other_args[@]}" ); fi
+  # If the user requested no-PIE, pass the appropriate linker flag
+  if (( want_no_pie )); then
+    cmd+=( "-L-no-pie" )
+  fi
   if [[ -n $out ]]; then
     cmd+=( "-of=${out}" )
   fi
