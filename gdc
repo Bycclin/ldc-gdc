@@ -73,8 +73,7 @@ add_pic_flag() {
     esac
   else
     case $mode in
-      pic) other_args+=( "-relocation-model=pic" ) ;;
-      pie) other_args+=( "-relocation-model=pie" ) ;;
+      pic|pie) other_args+=( "-relocation-model=pic" ) ;;
     esac
   fi
 }
